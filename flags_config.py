@@ -32,6 +32,9 @@ import os
 import tensorflow as tf
 import pickle
 import math
+import json
+import sys
+import numpy as np
 
 
 ## Bretagne dataset
@@ -191,6 +194,53 @@ config = FLAGS
 
 ## CONFIGS
 #===============================================
+
+# Load encoding metadata BEFORE deriving bin counts or building the graph.
+# Works with metadata.json emitted by dataset_preprocessing.py.
+def _encoding_metadata(path):
+    with open(path, 'r') as stream:
+        info = json.load(stream)
+    if info.get('normalized') is not True:
+        raise ValueError('%s is not a normalized, processed dataset. Run dataset_preprocessing.py first.' % path)
+    roi = info['roi']
+    res = info['resolutions']
+    if len(res) != 4:
+        raise ValueError('Expected four resolutions in %s' % path)
+    values = dict(zip(('onehot_lat_reso','onehot_lon_reso','onehot_sog_reso','onehot_cog_reso'), res))
+    values.update(lat_min=roi['south'], lat_max=roi['north'], lon_min=roi['west'], lon_max=roi['east'])
+    values = {key: float(value) for key, value in values.items()}
+    spans = [values['lat_max']-values['lat_min'], values['lon_max']-values['lon_min'], SPEED_MAX, 360.]
+    if not all(math.isfinite(x) for x in values.values()) or any(x <= 0 for x in spans+list(res)):
+        raise ValueError('Invalid ROI/resolutions in %s' % path)
+    bins = [math.ceil(span/float(r)) for span,r in zip(spans,res)]
+    if list(info.get('bins',bins)) != bins or info.get('data_dim',sum(bins)) != sum(bins):
+        raise ValueError('Inconsistent bin counts in %s' % path)
+    return values, bins
+
+_training_folder = os.path.dirname(os.path.join(config.dataset_dir, config.trainingset_name))
+_metadata_path = os.path.join(_training_folder, 'metadata.json')
+if os.path.isfile(_metadata_path):
+    _values, _bins = _encoding_metadata(_metadata_path)
+    _explicit = {arg.split('=',1)[0][2:] for arg in sys.argv[1:] if arg.startswith('--')}
+    for _key, _value in _values.items():
+        if _key in _explicit and not math.isclose(float(getattr(config,_key)), _value, rel_tol=0, abs_tol=1e-12):
+            raise ValueError('--%s conflicts with %s. Remove the override or use a matching processed dataset.' % (_key,_metadata_path))
+        setattr(config, _key, _value)
+    # Validation/evaluation data must use the same geographical encoding.
+    if config.testset_name:
+        _test_meta = os.path.join(os.path.dirname(os.path.join(config.dataset_dir,config.testset_name)), 'metadata.json')
+        if os.path.isfile(_test_meta) and os.path.abspath(_test_meta) != os.path.abspath(_metadata_path):
+            _test_values, _ = _encoding_metadata(_test_meta)
+            if _test_values != _values:
+                raise ValueError('Training and evaluation metadata use different encodings')
+    _mean_path = os.path.join(_training_folder, 'mean.pkl')
+    with open(_mean_path, 'rb') as _stream:
+        _mean = np.asarray(pickle.load(_stream))
+    if _mean.shape != (sum(_bins),) or not np.isfinite(_mean).all():
+        raise ValueError('mean.pkl must contain %d finite values for this dataset' % sum(_bins))
+    print('Encoding loaded from %s; bins=%s; dimension=%d' % (_metadata_path,_bins,sum(_bins)))
+else:
+    print('No processed metadata.json found; using explicit/default ROI and resolutions.')
 
 ## FOUR-HOT VECTOR 
 config.onehot_lat_bins = math.ceil((config.lat_max-config.lat_min)/config.onehot_lat_reso)

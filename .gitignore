@@ -1,1 +1,13 @@
 cls*/
+
+__pycache__
+chkpt/*
+
+data/ct*
+data/ais_2021_*
+data/florida_2021*
+results*
+
+.DS_Store
+.vscode/
+
